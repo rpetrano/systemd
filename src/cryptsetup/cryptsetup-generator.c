@@ -63,8 +63,10 @@ static int create_disk(
 
         _cleanup_free_ char *p = NULL, *n = NULL, *d = NULL, *u = NULL, *e = NULL,
                 *filtered = NULL, *u_escaped = NULL, *password_escaped = NULL, *filtered_escaped = NULL, *name_escaped = NULL;
+        _cleanup_strv_free_ char **headers = NULL;
         _cleanup_fclose_ FILE *f = NULL;
         const char *dmname;
+        char *header = NULL;
         bool noauto, nofail, tmp, swap, netdev;
         int r;
 
@@ -72,10 +74,20 @@ static int create_disk(
         assert(device);
 
         noauto = fstab_test_yes_no_option(options, "noauto\0" "auto\0");
-        nofail = fstab_test_yes_no_option(options, "nofail\0" "fail\0");
+        nofail = !fstab_test_yes_no_option(options, "fail\0" "nofail\0");
         tmp = fstab_test_option(options, "tmp\0");
         swap = fstab_test_option(options, "swap\0");
         netdev = fstab_test_option(options, "_netdev\0");
+
+        if (options) {
+                r = fstab_extract_values(options, "header\0", &headers);
+                if (strv_length(headers) > 1) {
+                        log_error("Multiple headers specified for device '%s'", name);
+                        return -EINVAL;
+                }
+                if (r)
+                        header = headers[0];
+        }
 
         if (tmp && swap) {
                 log_error("Device '%s' cannot be both 'tmp' and 'swap'. Ignoring.", name);
@@ -161,6 +173,25 @@ static int create_disk(
                                         fprintf(f, "RequiresMountsFor=%s\n", password_escaped);
                         }
                 }
+        }
+
+        if (header) {
+                _cleanup_free_ char *header_udev_path = NULL;
+
+                header_udev_path = fstab_node_to_udev_node(header);
+                if (!header_udev_path)
+                        return log_oom();
+
+                if (is_device_path(header_udev_path)) {
+                        _cleanup_free_ char *header_unit_name = NULL;
+
+                        r = unit_name_from_path(header_udev_path, ".device", &header_unit_name);
+                        if (r < 0)
+                                return log_error_errno(r, "Failed to generate unit name: %m");
+
+                        fprintf(f, "After=%1$s\nRequires=%1$s\n", header_unit_name);
+                } else
+                        fprintf(f, "RequiresMountsFor=%s\n", header);
         }
 
         if (path_startswith(u, "/dev/")) {
